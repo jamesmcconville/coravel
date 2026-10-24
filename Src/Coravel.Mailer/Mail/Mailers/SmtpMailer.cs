@@ -50,16 +50,22 @@ namespace Coravel.Mailer.Mail.Mailers
             await mailable.SendAsync(this._renderer, this);
         }
 
-        public async Task SendAsync(string message, string subject, IEnumerable<MailRecipient> to, MailRecipient from, MailRecipient replyTo, IEnumerable<MailRecipient> cc, IEnumerable<MailRecipient> bcc, IEnumerable<Attachment> attachments = null)
+        public async Task SendAsync(MessageBody message, string subject, IEnumerable<MailRecipient> to, MailRecipient from, MailRecipient replyTo, IEnumerable<MailRecipient> cc, IEnumerable<MailRecipient> bcc, IEnumerable<Attachment> attachments = null, MailRecipient sender = null)
         {
             var mail = new MimeMessage();
             
             this.SetFrom(@from, mail);
+            SetSender(sender, mail);
             SetRecipients(to, mail);
             SetCc(cc, mail);
             SetBcc(bcc, mail);
             mail.Subject = subject;
             SetMailBody(message, attachments, mail);
+
+            if (replyTo != null)
+            {
+                SetReplyTo(replyTo, mail);
+            }
 
             using (var client = new SmtpClient())
             {
@@ -76,14 +82,23 @@ namespace Coravel.Mailer.Mail.Mailers
             }
         }
 
-        private static void SetMailBody(string message, IEnumerable<Attachment> attachments, MimeMessage mail)
+        private static void SetMailBody(MessageBody message, IEnumerable<Attachment> attachments, MimeMessage mail)
         {
-            var bodyBuilder = new BodyBuilder { HtmlBody = message };
+            var bodyBuilder = new BodyBuilder { HtmlBody = message.Html, TextBody = message.Text };
             if (attachments != null)
             {
                 foreach (var attachment in attachments)
                 {
-                    bodyBuilder.Attachments.Add(attachment.Name, attachment.Bytes);
+                    if (string.IsNullOrWhiteSpace(attachment.ContentId) == false)
+                    {
+                        var image = bodyBuilder.LinkedResources.Add(attachment.Name, attachment.Bytes);
+                        // We do this instead of using their value because RFC states the Content-Id value MUST be in the message id format.
+                        image.ContentId = MimeKit.Utils.MimeUtils.GenerateMessageId();
+                        // Now replace where they applied it in the html template with the updated correct version
+                        bodyBuilder.HtmlBody = bodyBuilder.HtmlBody.Replace($"\"cid:{attachment.ContentId}\"", $"\"cid:{image.ContentId}\"", System.StringComparison.OrdinalIgnoreCase);
+                    }
+                    else
+                        bodyBuilder.Attachments.Add(attachment.Name, attachment.Bytes);
                 }
             }
 
@@ -116,7 +131,22 @@ namespace Coravel.Mailer.Mail.Mailers
 
         private void SetFrom(MailRecipient @from, MimeMessage mail)
         {
-            mail.From.Add(AsMailboxAddress(this._globalFrom ?? @from));
+            mail.From.Add(AsMailboxAddress(@from ?? this._globalFrom));
+        }
+
+        private static void SetSender(MailRecipient sender, MimeMessage mail)
+        {
+            if(sender is null)
+            {
+                return;
+            }
+            
+            mail.Sender = AsMailboxAddress(sender);            
+        }
+
+        private static void SetReplyTo(MailRecipient replyTo, MimeMessage mail)
+        {
+            mail.ReplyTo.Add(AsMailboxAddress(replyTo));
         }
 
         private static MailboxAddress AsMailboxAddress(MailRecipient recipient) =>

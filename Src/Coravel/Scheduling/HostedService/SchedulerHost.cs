@@ -1,28 +1,35 @@
 using System;
+using System.Linq;
 using System.Threading;
 using System.Threading.Tasks;
 using Microsoft.Extensions.Hosting;
 using Coravel.Scheduling.Schedule;
 using Coravel.Scheduling.Schedule.Interfaces;
 using Microsoft.Extensions.Logging;
+using Microsoft.Extensions.Configuration;
 
 namespace Coravel.Scheduling.HostedService
 {
     internal class SchedulerHost : IHostedService, IDisposable
     {
-        private Scheduler _scheduler;
+        private readonly Scheduler _scheduler;
+        private readonly ILogger<SchedulerHost> _logger;
+        private readonly IHostApplicationLifetime _lifetime;
+        private readonly IConfiguration _config;
         private Timer _timer;
         private bool _schedulerEnabled = true;
-        private ILogger<SchedulerHost> _logger;
-        private IHostApplicationLifetime _lifetime;
+        private object _tickLockObj = new object();
+        private EnsureContinuousSecondTicks _ensureContinuousSecondTicks;
         private readonly string ScheduledTasksRunningMessage = "Coravel's Scheduling service is attempting to close but there are tasks still running." +
                                                                " App closing (in background) will be prevented until all tasks are completed.";
 
-        public SchedulerHost(IScheduler scheduler, ILogger<SchedulerHost> logger, IHostApplicationLifetime lifetime)
+        public SchedulerHost(IScheduler scheduler, ILogger<SchedulerHost> logger, IHostApplicationLifetime lifetime, IConfiguration config)
         {
             this._scheduler = scheduler as Scheduler;
             this._logger = logger;
             this._lifetime = lifetime;
+            this._ensureContinuousSecondTicks = new EnsureContinuousSecondTicks(DateTime.UtcNow);
+            this._config = config;
         }
 
         public Task StartAsync(CancellationToken cancellationToken)
@@ -44,7 +51,33 @@ namespace Coravel.Scheduling.HostedService
         {
             if (this._schedulerEnabled)
             {
-                await this._scheduler.RunSchedulerAsync();
+                // This will get any missed ticks that might arise from the Timer triggering a little too late. 
+                // If under CPU load or if the Timer is for some reason a little slow, then it's possible to
+                // miss a tick - which we want to make sure the scheduler doesn't miss and catches up.
+                var now = DateTime.UtcNow;
+                DateTime[] ticks = null;
+                lock (_tickLockObj)
+                {
+                    // This class isn't thread-safe.
+                    ticks = this._ensureContinuousSecondTicks.GetTicksBetweenPreviousAndNext(now).ToArray();
+                    this._ensureContinuousSecondTicks.SetNextTick(now);
+                }
+
+                if (ticks.Length > 0)
+                {       
+                    if(this._config.GetValue<bool?>("Coravel:Schedule:LogTickCatchUp") ?? false) 
+                    {        
+                        this._logger.LogInformation($"Coravel's scheduler is behind {ticks.Length} ticks and is catching-up to the current tick. Triggered at {now.ToString("o")}.");
+                    }
+                    
+                    foreach (var tick in ticks)
+                    {
+                        await this._scheduler.RunAtAsync(tick);
+                    }
+                }
+
+                // If we've processed any missed ticks, we also need to explicitly run the current tick.
+                await this._scheduler.RunAtAsync(now);
             }
         }
 

@@ -1,4 +1,5 @@
 ﻿using System;
+using System.Threading;
 using Coravel;
 using Coravel.Events.Interfaces;
 using Coravel.Queuing.Interfaces;
@@ -33,7 +34,8 @@ namespace Demo
                 options.MinimumSameSitePolicy = SameSiteMode.None;
             });
 
-            services.AddMvc().SetCompatibilityVersion(CompatibilityVersion.Version_2_1);
+            services.AddMvc(options => { options.EnableEndpointRouting = false; }).AddRazorRuntimeCompilation();
+            services.AddControllersWithViews();
 
             // Coravel Scheduling
             services.AddScheduler();
@@ -42,7 +44,7 @@ namespace Demo
             services.AddQueue();
 
             // Coravel Caching
-            services.AddSQLServerCache(this.Configuration.GetConnectionString("DefaultConnection"));
+            //services.AddSQLServerCache(this.Configuration.GetConnectionString("DefaultConnection"));
            // services.AddPostgreSQLCache(this.Configuration.GetConnectionString("PostGreSQL"));
 
             // Coravel Mail
@@ -50,6 +52,7 @@ namespace Demo
 
             services.AddScoped<SendNightlyReportsEmailJob>();
             services.AddScoped<DoExpensiveCalculationAndStore>();
+            services.AddScoped<Demo.Invocables.RebuildStaticCachedData>();
 
             services.AddEvents();
 
@@ -67,10 +70,10 @@ namespace Demo
             else
             {
                 app.UseExceptionHandler("/Home/Error");
-                app.UseHsts();
+               // app.UseHsts();
             }
 
-            app.UseHttpsRedirection();
+           // app.UseHttpsRedirection();
             app.UseStaticFiles();
             app.UseCookiePolicy();
 
@@ -91,7 +94,7 @@ namespace Demo
             {
                 scheduler.OnWorker("CPUIntensiveTasks");
                 scheduler
-                    .Schedule<RebuildStaticCachedData>().Hourly();
+                    .Schedule<RebuildStaticCachedData>().EveryFifteenSeconds();
 
                 scheduler.OnWorker("TestingSeconds");
                 scheduler.Schedule(
@@ -103,7 +106,10 @@ namespace Demo
                 scheduler.Schedule(() => Console.WriteLine($"Runs every thirty seconds. Ran at: {DateTime.UtcNow}")).EveryThirtySeconds();
                 scheduler.Schedule(() => Console.WriteLine($"Runs every minute Ran at: {DateTime.UtcNow}")).EveryMinute();
                 scheduler.Schedule(() => Console.WriteLine($"Runs every 2nd minute Ran at: {DateTime.UtcNow}")).Cron("*/2 * * * *");
-            });
+
+
+                scheduler.Schedule(() => Thread.Sleep(5000)).EverySecond();
+            }).LogScheduledTaskProgress();
 
             app.ApplicationServices
                 .ConfigureQueue()

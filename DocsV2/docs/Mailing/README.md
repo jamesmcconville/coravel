@@ -43,9 +43,17 @@ This will install the Nuget package `Coravel.Mailer`, along with scaffolding som
 
 ## Config
 
-### Configure Services
+### Configure Mailer
 
-In `Startup.ConfigureServices()`:
+From `Program.cs` in newer minimal .NET configurations:
+
+```csharp
+var builder = WebApplication.CreateBuilder(args);
+
+builder.AddMailer();
+```
+
+Using non-web projects, you would do this inside of your `Startup.ConfigureServices()` method:
 
 ```csharp
 services.AddMailer(this.Configuration); // Instance of IConfiguration.
@@ -89,26 +97,36 @@ Add the following keys:
 
 #### Custom Driver
 
-The custom driver allows you to decide how you want to send e-mails (through some API call, etc.). Because it requires a closure, you need to explicitly call `AddCustomMailer()` in `ConfigureServices()`:
+The custom driver allows you to decide how you want to send e-mails - using HTTP APIs, something else, etc.
+
+The recommended way to configure a customer mailer is by implementing `Coravel.Mailer.Mail.Interfaces.ICanSendMail`. This class will allow your custom mailer to participate in the dependency injection configuration so that you can inject things like HTTP clients, etc.
+
+To configure it, in `Program.cs` instead of calling `AddMailer()` you do:
 
 ```csharp
-// A local function with the expected signature.
-// This defines how all e-mails are sent.
-async Task SendMailCustomAsync(
-    string message,
-    string subject,
-    IEnumerable<MailRecipient> to,
-    MailRecipient from,
-    MailRecipient replyTo,
-    IEnumerable<MailRecipient> cc,
-    IEnumerable<MailRecipient> bcc,
-    IEnumerable<Attachment> attachments = null
-)
-{
-    // Custom logic for sending an email.
-}
+var builder = WebApplication.CreateBuilder(args);
 
-services.AddCustomMailer(this.Configuration, SendMailCustomAsync);
+builder.Services.AddScoped<MyHttpApiCustomMailer>();
+builder.AddCustomMailer<MyHttpApiCustomMailer>();
+```
+
+Here's an example of a custom mailer:
+
+```csharp
+public class MyHttpApiCustomMailer : ICanSendMail
+{
+    private readonly IHttpClient _httpClient;
+
+    public MyHttpApiCustomMailer(IHttpClientFactory httpFactory)
+    {
+        this._httpClient = httpFactory.CreateHttpClient("MailApi");
+    }
+
+    public async Task SendAsync(MessageBody message, string subject, IEnumerable<MailRecipient> to, MailRecipient from, MailRecipient replyTo, IEnumerable<MailRecipient> cc, IEnumerable<MailRecipient> bcc, IEnumerable<Attachment> attachments = null, MailRecipient sender = null)
+    {
+        // Code that uses the HttpClient to send mail via an HTTP API.
+    }
+}
 ```
 
 ### Built-In View Templates
@@ -134,7 +152,7 @@ What about static content like the mail footer and logo? Coravel's got you cover
 
 In your `appsettings.json`, you may add the following global values that will populate when using Coravel's built-in templates:
 
-```
+```json
 "Coravel": {
     "Mail": {
         /* Your app's logo that will be shown at the top of your e-mails. */
@@ -156,8 +174,8 @@ In your `appsettings.json`, you may add the following global values that will po
 
 ### Creating A Mailable
 
-Coravel uses **Mailables** to send mail. Each Mailable is a c# class that represents a specific type of e-mail
-that you can send, such as "New User Sign-up", "Completed Order", etc.
+Coravel uses **Mailables** to send mail. You can create a C# class that represents a specific type of e-mail
+that you can send, such as "New User Sign-up", "Completed Order", etc. This approach is useful whenever you want to encapsulate the logic for this email type and can re-use it across your application (see next section for an alternative approach).
 
 :::tip
 If you used the Coravel CLI, it already generated a sample Mailable in your `~/Mailables` folder!
@@ -193,41 +211,169 @@ All of the configuration for a Mailable is done in the `Build()` method.
 
 You can then call various methods like `To` and `From` to configure the recipients, sender, etc.
 
+#### Inline Mailables
+
+You can create mailables on-the-fly if this is preferred. From the code that is trying to send an email - like a controller action or pub/sub handler - you can call either `Mailable.AsInline()` or `Mailable.AsInline<T>()`.
+
+The generic version allows you to send email using `View(string viewPath, T viewModel)`:
+
+```csharp
+public async Task<IActionResult> SendMyEmail()
+{
+    UserModel user = new UserModel()
+    {
+        Email = "FromUserModel@test.com",
+        Name = "Coravel Test Person"
+    };
+
+    await this._mailer.SendAsync(
+        Mailable.AsInline<UserModel>()
+            .To(user)
+            .From("from@test.com")
+            .View("~/Views/Mail/NewUser.cshtml", user)
+    );
+
+    return Ok();
+}
+```
+
+The non-generic version is suited to using `Html()` and/or `Text()` when passing a view model is not needed.
+
+```csharp
+public async Task<IActionResult> SendMyEmail()
+{
+    UserModel user = new UserModel()
+    {
+        Email = "FromUserModel@test.com",
+        Name = "Coravel Test Person"
+    };
+
+    await this._mailer.SendAsync(
+        Mailable.AsInline()
+            .To(user)
+            .From("from@test.com")
+            .Html($"<html><body><h1>Welcome {user.Name}</h1></body></html>")
+            .Text($"Welcome {user.Name}")
+    );
+
+    return Ok();
+}
+```
+
 ### From
 
-To specify who the sender of the email is, use the `From()` method:
+To specify who the email is from, use the `From()` method:
 
-`From("test@test.com")`
+```csharp
+From("test@test.com")
+```
 
 You may also supply an instance of `Coravel.Mailer.Mail.MailRecipient` to include the address and sender name:
 
-`From(new MailRecipient(email, name))`
+```csharp
+From(new MailRecipient(email, name))
+```
 
-### Send To Recipient
+You can set a global from address by setting it in `appsettings.json`:
+
+```json
+  "Coravel": {
+    "Mail": {
+      "From":{
+        "Address": "global@from.com",
+        "Name": "My Company"
+      }
+    }
+  }
+```
+
+### To
 
 Using the `To()` method, you can supply the recipient's e-mail address and name.
 
-#### Address
+Or, using an e-mail address in a `string`:
 
-Using an e-mail address in a `string`:
+```csharp
+To("test@test.com")
+```
 
-`To("test@test.com")`
+You can also pass:
+- `To(IEnumerable<string>)`
+- `To(MailRecipient)`
+- `To(IEnumerable<MailRecipient>)`
 
-#### Multiple Addresses
+### Html
 
-You can pass`IEnumerable<string>` to the `To()` method.
+If you want to supply raw Html as your e-mail use the `Html(string html)` method:
 
-#### MailRecipient
+```csharp
+public override void Build()
+{
+    this.To(this._user)
+        .From("from@test.com")
+        .Html(someHtml);
+}
+```
 
-Pass an instance of `MailRecipient` to the `To()` method.
+In this case, your Mailable class should use the `string` generic type: `public class MyMailable : Mailable<string>`.
 
-#### Multiple MailRecipients
+### Text
 
-Pass an `IEnumerable<MailRecipient>` to the `To()` method.
+If you want to add a plain text representation of your email then use `Text(string plainText)`:
+
+```csharp
+public override void Build()
+{
+    this.To(this._user)
+        .From("from@test.com")
+        .Html(someHtml)
+        .Text(plainText);
+}
+```
+
+`Text()` doesn't replace `Html()` or `View()`. It _adds_ a plain text representation to your email that the email client will use in the event it doesn't support HTML.
+
+### Sender
+
+To specify the sender of the email (different from the `From` address), use the `Sender()` method:
+
+```csharp
+Sender("test@test.com")
+```
 
 #### Attachments
 
 Attach multiple files by passing an `Attachment` to the `Attach()` method.
+
+Each attachment has a few fields to assign:
+
+- `Bytes`: The `byte[]` of the file you are attaching.
+- `Name`: The name of the file to attach.
+- `ContentId`: Often used for embedding images into emails. Assign a value that is unique within your email template.
+
+##### Embedding Images
+
+To embed images into your email you can assign the `ContentId` field with a unique value that will also be used in your email.
+
+For example:
+
+```csharp
+emailMessage
+    .Attach(new Attachment
+    {
+        Name = "My Image",
+        Bytes = myBytes,
+        ContentId = "my-image"
+    });
+```
+
+```html
+<html>
+    <img src="cid:my-image" />
+</html>
+```
+
+Coravel will automatically link the embedded resources to the email properly for you.
 
 #### Auto-Detect Email Address And Name
 
@@ -255,31 +401,31 @@ Further methods, which all accept either `IEnumerable<string>` or `IEnumerable<M
 - `Bcc`
 - `ReplyTo`
 
-### Specifying Mail Templates
+### Mail Templates With `View()`
 
-#### Razor Templates
+#### .NET Core 3.1+
 
-##### .NET Core 3.1+
+For a standard .NET 6+ web project, this should work out-of-the-box. If using a shared library, the following applies.
 
 In .NET Core 3.1 there were some breaking changes to the way razor views are handled.
 
-Which ever project(s) you have razor views inside, you'll need to make sure .NET compiles them at build time.
-
-Here's what you'll need to change within your `.csproj` file to enable this:
+If you have a shared library with razor views inside, you'll need to make sure .NET compiles them at build time by adding the following to your `.csproj`:
 
 ```xml
 <Project Sdk="Microsoft.NET.Sdk.Razor">  👈 Make sure it's this SDK.
 
   <PropertyGroup>
-    <OutputType>Exe</OutputType>
-    <TargetFramework>netcoreapp3.1</TargetFramework>
     <AddRazorSupportForMvc>True</AddRazorSupportForMvc> 👈 Add this too.
   </PropertyGroup>
 ```
 
-##### Razor Views
+#### View
 
 Using a razor view to send e-mails is done using the `View(string viewPath, T viewModel)` method.
+
+:::tip
+You can still use `Text(string planText)` to add an alternative plain text representation beside the HTML message that calling `View()` produces.
+:::
 
 The type of the `viewModel` parameter must match the type of your Mailable's generic type parameter. For example, a `Mailable<UserModel>` will have the method `View(string viewPath, UserModel viewModel)`. Coravel will automatically bind the model to your view so you can generate dynamic content (just like using `View()` inside your MVC controllers).
 
@@ -296,8 +442,6 @@ public class MyMailable : Mailable<string>
     }
 }
 ```
-
-##### Example
 
 :::tip
 The CLI generated a sample for you at `~/Views/Example.cshtml`.
@@ -326,22 +470,7 @@ It might look like this (which uses a built-in template):
 }
 ```
 
-#### Html Template
-
-If you want to supply raw Html as your e-mail use the `Html(string html)` method:
-
-```csharp
-public override void Build()
-{
-    this.To(this._user)
-        .From("from@test.com")
-        .Html(someHtml);
-}
-```
-
-In this case, your Mailable class should use the `string` generic type: `public class MyMailable : Mailable<string>`.
-
-## Mail Templates
+## Mail Template Components
 
 When using razor views, there are various pieces of data that Coravel will automatically passes for you:
 
@@ -476,3 +605,7 @@ public async Task<IActionResult> RenderView()
     return Content(message, "text/html");
 }
 ```
+
+:::tip
+Since we can only render 1 mail body, using `Html()` or `View()` will take precedence over `Text()` when rendering an email with `RenderAsync()`.
+:::

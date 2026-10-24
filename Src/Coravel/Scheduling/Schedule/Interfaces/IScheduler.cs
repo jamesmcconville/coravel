@@ -1,4 +1,5 @@
 using System;
+using System.Collections.Generic;
 using System.Threading.Tasks;
 using Coravel.Invocable;
 
@@ -58,10 +59,16 @@ namespace Coravel.Scheduling.Schedule.Interfaces
 
         /// <summary>
         /// Begin scheduling further tasks on an isolated worker.
-        /// A worker will run all scheduled tasks on it's own separate thread.
+        /// A worker will run all scheduled tasks on its own separate thread.
         /// </summary>
         /// <param name="workerName"></param>
         /// <returns></returns>
         IScheduler OnWorker(string workerName);
+
+        /// <summary>
+        /// Gets a data representation of all currently active schedules.
+        /// </summary>
+        /// <returns>A read-only list of ScheduleInfo objects containing information about all active schedules.</returns>
+        IReadOnlyList<ScheduleInfo> GetSchedules();
     }
 }

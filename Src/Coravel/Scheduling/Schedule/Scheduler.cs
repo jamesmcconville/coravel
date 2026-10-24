@@ -18,7 +18,7 @@ namespace Coravel.Scheduling.Schedule
     {
         private ConcurrentDictionary<string, ScheduledTask> _tasks;
         private Action<Exception> _errorHandler;
-        private ILogger<IScheduler> _logger;
+        private bool _shouldLogProgress = false;
         private IMutex _mutex;
         private readonly int EventLockTimeout_24Hours = 1440;
         private IServiceScopeFactory _scopeFactory;
@@ -27,6 +27,7 @@ namespace Coravel.Scheduling.Schedule
         private string _currentWorkerName;
         private CancellationTokenSource _cancellationTokenSource;
         private bool _isFirstTick = true;
+        private object _isFirstTickLockObj = new object();
 
         public Scheduler(IMutex mutex, IServiceScopeFactory scopeFactory, IDispatcher dispatcher)
         {
@@ -99,17 +100,24 @@ namespace Coravel.Scheduling.Schedule
             return this;
         }
 
-        public async Task RunSchedulerAsync()
-        {
-            DateTime utcNow = DateTime.UtcNow;
-            await this.RunAtAsync(utcNow);
-        }
-
         public async Task RunAtAsync(DateTime utcDate)
         {
             Interlocked.Increment(ref this._schedulerIterationsActiveCount);
-            bool isFirstTick = this._isFirstTick;
-            this._isFirstTick = false;
+            
+            // Possibility for race condition here.
+            // Note: This was a bug fixed by issue 353.
+            bool isFirstTick = false;
+            if(this._isFirstTick)
+            {
+                lock(this._isFirstTickLockObj)
+                {
+                    // Set to `this._isFirstTick` not `true` because there might be multiple threads coming into
+                    // this critical section - but only one should count as "the first run".
+                    isFirstTick = this._isFirstTick;
+                    this._isFirstTick = false;
+                }
+            }
+
             await RunWorkersAt(utcDate, isFirstTick);
             Interlocked.Decrement(ref this._schedulerIterationsActiveCount);
         }
@@ -120,9 +128,9 @@ namespace Coravel.Scheduling.Schedule
             return this;
         }
 
-        public ISchedulerConfiguration LogScheduledTaskProgress(ILogger<IScheduler> logger)
+        public ISchedulerConfiguration LogScheduledTaskProgress()
         {
-            this._logger = logger;
+            this._shouldLogProgress = true;
             return this;
         }
 
@@ -141,17 +149,34 @@ namespace Coravel.Scheduling.Schedule
             return true; // Nothing to remove - was successful.
         }
 
-        private async Task InvokeEventWithLoggerScope(ScheduledEvent scheduledEvent)
+        public IReadOnlyList<ScheduleInfo> GetSchedules()
         {
-            var eventInvocableTypeName = scheduledEvent.InvocableType()?.Name;
-            using (_logger != null && eventInvocableTypeName != null ?
-                _logger.BeginScope($"Invocable Type : {eventInvocableTypeName}") : null)
+            return this._tasks.Values
+                .Select(task => task.ScheduledEvent)
+                .OfType<IGetScheduleInfo>()
+                .Select(dataProvider => dataProvider.GetScheduleInfo())
+                .ToList();
+        }
+
+        private async Task InvokeEventWithLoggerScope(ScheduledEvent scheduledEvent)
+        {         
+            using var scope = this._scopeFactory.CreateAsyncScope();
+            ILogger<IScheduler> logger = null;
+
+            if(this._shouldLogProgress)
             {
-                await InvokeEvent(scheduledEvent);
+                logger = scope.ServiceProvider.GetRequiredService<ILogger<IScheduler>>();
+            }
+
+            var eventInvocableTypeName = scheduledEvent.InvocableType()?.Name;
+            using (logger != null && eventInvocableTypeName != null ?
+                logger.BeginScope($"Invocable Type : {eventInvocableTypeName}") : null)
+            {
+                await InvokeEvent(scheduledEvent, logger);
             }
         }
 
-        private async Task InvokeEvent(ScheduledEvent scheduledEvent)
+        private async Task InvokeEvent(ScheduledEvent scheduledEvent, ILogger<IScheduler> logger)
         {
             try
             {
@@ -159,9 +184,9 @@ namespace Coravel.Scheduling.Schedule
 
                 async Task Invoke()
                 {
-                    this._logger?.LogDebug("Scheduled task started...");
+                    logger?.LogDebug("Scheduled task started...");
                     await scheduledEvent.InvokeScheduledEvent(this._cancellationTokenSource.Token);
-                    this._logger?.LogDebug("Scheduled task finished...");
+                    logger?.LogDebug("Scheduled task finished...");
                 };
 
                 if (scheduledEvent.ShouldPreventOverlapping())
@@ -189,15 +214,15 @@ namespace Coravel.Scheduling.Schedule
             {
                 await this.TryDispatchEvent(new ScheduledEventFailed(scheduledEvent, e));
 
-                this._logger?.LogError(e, "A scheduled task threw an Exception: ");
+                logger?.LogError(e, "A scheduled task threw an Exception: ");
 
                 this._errorHandler?.Invoke(e);
             }
         }
 
         /// <summary>
-        /// This will grab all the scheduled tasks and combine each task into it's assigned "worker".
-        /// Each worker runs on it's own thread and will process it's assigned scheduled tasks asynchronously.
+        /// This will grab all the scheduled tasks and combine each task into its assigned "worker".
+        /// Each worker runs on its own thread and will process its assigned scheduled tasks asynchronously.
         /// This method return a list of active tasks (one per worker - which needs to be awaited).
         /// </summary>
         /// <param name="utcDate"></param>
@@ -229,7 +254,7 @@ namespace Coravel.Scheduling.Schedule
                 }
             }
 
-            // We want each "worker" (indicated by the "WorkerName" prop) to run on it's own thread.
+            // We want each "worker" (indicated by the "WorkerName" prop) to run on its own thread.
             // So we'll group all the "due" scheduled events (the actual work the user wants to perform) into
             // buckets for each "worker".
             var groupedScheduledEvents = scheduledWorkers
